@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Journal</title>
+  <style>
+    :root { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+    body { margin: 0; background: #0b0f14; color: #e6edf3; }
+    header { padding: 14px 16px; border-bottom: 1px solid #1f2a37; display:flex; gap:12px; align-items:center; }
+    header h1 { font-size: 16px; margin: 0; opacity: .95; }
+    main { display: grid; grid-template-columns: 320px 1fr; height: calc(100vh - 49px); }
+    aside { border-right: 1px solid #1f2a37; padding: 12px; overflow:auto; }
+    section { padding: 12px; overflow:auto; }
+    .row { display:flex; gap:8px; flex-wrap: wrap; }
+    input, button, textarea {
+      background: #0f172a; color: #e6edf3;
+      border: 1px solid #243244; border-radius: 10px;
+      padding: 10px 12px; font-size: 14px;
+    }
+    button { cursor:pointer; }
+    button:hover { filter: brightness(1.08); }
+    .muted { color:#9aa4b2; font-size: 12px; }
+    .list { margin-top: 10px; display:flex; flex-direction: column; gap:6px; }
+    .item {
+      padding: 10px 12px; border:1px solid #243244; border-radius: 10px;
+      display:flex; justify-content: space-between; align-items:center;
+      background:#0f172a;
+    }
+    .item a { color:#e6edf3; text-decoration: none; }
+    .item a:hover { text-decoration: underline; }
+    .active { outline: 2px solid #334155; }
+    textarea { width:100%; min-height: 65vh; resize: vertical; line-height: 1.4; }
+    .toolbar { display:flex; gap:8px; align-items:center; flex-wrap: wrap; margin-bottom: 10px; }
+    .spacer { flex: 1; }
+    .status { font-size: 12px; color:#9aa4b2; }
+    .danger { border-color: #5b2330; background:#1a0f14; }
+    @media (max-width: 900px) { main { grid-template-columns: 1fr; } aside { height: 40vh; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Journal</h1>
+    <span class="muted">LAN web UI (Markdown files on disk)</span>
+  </header>
+
+  <main>
+    <aside>
+      <div class="row">
+        <input id="search" placeholder="Search dates… (e.g. 2026-02)" />
+        <button id="refresh">Refresh</button>
+      </div>
+
+      <div style="height:10px"></div>
+
+      <div class="row">
+        <button id="newToday">New today</button>
+        <input id="newDate" placeholder="YYYY-MM-DD" />
+        <button id="newForDate">New date</button>
+      </div>
+
+      <div class="list" id="list"></div>
+    </aside>
+
+    <section>
+      <div class="toolbar">
+        <div><b id="currentName">No entry opened</b></div>
+        <div class="spacer"></div>
+        <button id="save" disabled>Save</button>
+        <button id="delete" class="danger" disabled>Delete</button>
+      </div>
+
+      <div class="status" id="status">Ready.</div>
+      <div style="height:10px"></div>
+
+      <textarea id="editor" placeholder="Open or create an entry…" disabled></textarea>
+
+      <div style="height:10px"></div>
+      <div class="muted">
+        Tip: your entries are stored at <code>~/second-brain/daily/</code> as <code>YYYY-MM-DD.md</code>.
+      </div>
+    </section>
+  </main>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+
+  const state = {
+    entries: [],
+    current: null,
+    dirty: false
+  };
+
+  function todayName() {
+    const d = new Date();
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth()+1).padStart(2,"0");
+    const dd = String(d.getDate()).padStart(2,"0");
+    return `${yyyy}-${mm}-${dd}.md`;
+  }
+
+  function isValidDateStr(s) {
+    // Basic YYYY-MM-DD check
+    return /^\d{4}-\d{2}-\d{2}$/.test(s);
+  }
+
+  function template(dateStr) {
+    return `# Daily Reflection
+
+Date: ${dateStr}
+Start Time:
+End Time:
+Total Focus Time:
+
+## Mission
+-
+
+## What I studied today
+- Topic:
+- Concepts:
+- Practical work:
+
+## What I understood well
+-
+
+## What confused me
+-
+
+## Problems solved
+-
+
+## Tomorrow's ONE priority
+-
+
+## Focus score (1–10)
+-
+
+## Distractions
+-
+
+## Notes
+-
+`;
+  }
+
+  function setStatus(msg) { $("status").textContent = msg; }
+
+  function setDirty(d) {
+    state.dirty = d;
+    $("save").disabled = !state.current || !state.dirty;
+  }
+
+  async function api(path, opts) {
+    const res = await fetch(path, opts);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    return data;
+  }
+
+  function renderList() {
+    const q = $("search").value.trim();
+    const list = $("list");
+    list.innerHTML = "";
+
+    const filtered = state.entries.filter(name => !q || name.includes(q));
+
+    if (filtered.length === 0) {
+      const div = document.createElement("div");
+      div.className = "muted";
+      div.textContent = "No entries found.";
+      list.appendChild(div);
+      return;
+    }
+
+    filtered.forEach(name => {
+      const div = document.createElement("div");
+      div.className = "item" + (state.current === name ? " active" : "");
+      const a = document.createElement("a");
+      a.href = "#";
+      a.textContent = name.replace(".md","");
+      a.onclick = (e) => { e.preventDefault(); openEntry(name); };
+      div.appendChild(a);
+      list.appendChild(div);
+    });
+  }
+
+  async function refreshList() {
+    try {
+      setStatus("Loading entries…");
+      state.entries = await api("/api/entries");
+      renderList();
+      setStatus(`Loaded ${state.entries.length} entries.`);
+    } catch (e) {
+      setStatus("Error: " + e.message);
+    }
+  }
+
+  async function openEntry(name) {
+    try {
+      if (state.dirty && !confirm("You have unsaved changes. Continue?")) return;
+
+      setStatus("Opening " + name + "…");
+      const data = await api("/api/entries/" + encodeURIComponent(name));
+      state.current = data.name;
+
+      $("currentName").textContent = data.name;
+      $("editor").value = data.content;
+      $("editor").disabled = false;
+
+      $("save").disabled = true;
+      $("delete").disabled = false;
+
+      setDirty(false);
+      renderList();
+      setStatus("Opened " + name);
+    } catch (e) {
+      setStatus("Error: " + e.message);
+    }
+  }
+
+  async function saveCurrent() {
+    if (!state.current) return;
+    try {
+      setStatus("Saving…");
+      await api("/api/entries/" + encodeURIComponent(state.current), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: $("editor").value })
+      });
+      setDirty(false);
+      setStatus("Saved " + state.current);
+      await refreshList();
+    } catch (e) {
+      setStatus("Error: " + e.message);
+    }
+  }
+
+  async function createEntryFor(dateStr) {
+    const name = `${dateStr}.md`;
+    try {
+      setStatus("Creating " + name + "…");
+      await api("/api/entries/" + encodeURIComponent(name), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: template(dateStr) })
+      });
+      await refreshList();
+      await openEntry(name);
+    } catch (e) {
+      setStatus("Error: " + e.message);
+    }
+  }
+
+  async function deleteCurrent() {
+    if (!state.current) return;
+    const name = state.current;
+    if (!confirm("Delete " + name + "? This cannot be undone.")) return;
+
+    try {
+      setStatus("Deleting…");
+      await api("/api/entries/" + encodeURIComponent(name), { method: "DELETE" });
+
+      state.current = null;
+      $("currentName").textContent = "No entry opened";
+      $("editor").value = "";
+      $("editor").disabled = true;
+      $("save").disabled = true;
+      $("delete").disabled = true;
+
+      setDirty(false);
+      await refreshList();
+      setStatus("Deleted " + name);
+    } catch (e) {
+      setStatus("Error: " + e.message);
+    }
+  }
+
+  // Events
+  $("refresh").onclick = refreshList;
+
+  $("search").oninput = renderList;
+
+  $("editor").addEventListener("input", () => setDirty(true));
+
+  $("save").onclick = saveCurrent;
+
+  $("delete").onclick = deleteCurrent;
+
+  $("newToday").onclick = () => {
+    const name = todayName(); // YYYY-MM-DD.md
+    const dateStr = name.replace(".md","");
+    createEntryFor(dateStr);
+  };
+
+  $("newForDate").onclick = () => {
+    const dateStr = $("newDate").value.trim();
+    if (!isValidDateStr(dateStr)) {
+      setStatus("Enter date like YYYY-MM-DD");
+      return;
+    }
+    createEntryFor(dateStr);
+  };
+
+  // Boot
+  refreshList();
+</script>
+</body>
+</html>
